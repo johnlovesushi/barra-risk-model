@@ -237,15 +237,38 @@ for d in df_loadings["datetime"].unique():
     }
 
 list_to_insert = [
-    [k, factor_returns[k]["r2"], *factor_returns[k]["coefficients"]]
-    for k in factor_returns
+    [k, factor_returns[k]["r2"], *factor_returns[k]["t-values"],*factor_returns[k]["coefficients"]]
+    for k in factor_returns    # iterative through the factor returns dict
 ]
+#print(list_to_insert)
 cols = df_loadings.drop(columns=["return_1d", "datetime", "id"]).columns
 
-# df_factor_returns = df.append(pd.Series(list_to_insert, index=['date', 'r2', *cols]), ignore_index=True)  # using append
-df_factor_returns = pd.DataFrame(list_to_insert, columns=["datetime", "r2", *cols])
+# update
+cols_with_return = ['returns_' + col for col in cols]
+cols_with_t_values = ['t_values_' + col for col in cols]
 
-#### 4.3 Calc idiosyncratic risk
+# df_factor_returns = df.append(pd.Series(list_to_insert, index=['date', 'r2', *cols]), ignore_index=True)  # using append
+df_factor_returns = pd.DataFrame(list_to_insert, columns=["datetime", "r2", *cols_with_t_values, *cols_with_return])
+
+
+df_factor_returns_cp = df_factor_returns.copy()
+df_factor_returns_cp.set_index('datetime', inplace=True)
+
+# Group by year and month, then calculate the mean for each group
+monthly_summary = df_factor_returns_cp.resample('2YE').mean()
+
+# Reset index to have the 'datetime' column back if needed
+monthly_summary.reset_index(inplace=True)
+
+from tabulate import tabulate
+
+for index, row in monthly_summary.iterrows():
+    print(f"date: {row['datetime']}")
+    for column in monthly_summary.columns[1:]:
+        print(f"{column}: {row[column]}")
+    print("-" * 30)
+
+#### 4.3 Calc idiosyncratic risk: TODO
 
 factor_cols = [
     col
