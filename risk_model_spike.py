@@ -1,10 +1,10 @@
 sys.path.append("../../../../forecastos")
 
 # Now you can import the library as usual
-import forecastos as fos
-
-fos.api_endpoint = os.environ.get("FH_API_ENDPOINT")
-fos.fh_api_key = os.environ.get("FORECASTOS_API_KEY")
+# import forecastos as fos
+#
+# fos.api_endpoint = os.environ.get("FH_API_ENDPOINT")
+# fos.fh_api_key = os.environ.get("FORECASTOS_API_KEY")
 
 import pandas as pd
 import numpy as np
@@ -12,42 +12,206 @@ import os, sys
 
 # Now you can import the library as usual
 import investos as inv
-
+from scipy.stats import ttest_ind
+from sklearn.linear_model import LinearRegression
 #### 4.1 Loadings
 
 # 4.1 Idiosync only for now (gonna use off-the-shelf PCA based for this)
 
 # Get actual returns (for risk model)
-df_actual_returns = (
-    fos_h.find_feature("return_prev_1d_open", "trading", "return")
-    .get_df()
-    .sort_values(["id", "datetime"])
-)
-df_actual_returns = df_actual_returns[
-    (df_actual_returns.datetime <= max_dt) & (df_actual_returns.id.isin(company_ids))
-]
-# df_actual_returns = df_actual_returns.pivot(index='datetime', columns='id', values='value')
-df_actual_returns = df_actual_returns.fillna(0)
+# df_actual_returns = (
+#     fos_h.find_feature("return_prev_1d_open", "trading", "return")
+#     .get_df()
+#     .sort_values(["id", "datetime"])
+# )
+# df_actual_returns = df_actual_returns[
+#     (df_actual_returns.datetime <= max_dt) & (df_actual_returns.id.isin(company_ids))
+# ]
+# # df_actual_returns = df_actual_returns.pivot(index='datetime', columns='id', values='value')
+# df_actual_returns = df_actual_returns.fillna(0)
+#
+# # Join and calc industry loadings
+# df_loadings = df_actual_returns.merge(
+#     fos_h.find_feature("rbics_industry", "corporation", "classification")
+#     .get_df()
+#     .rename(columns={"value": "industry"}),
+#     on=["id"],
+#     how="left",
+# )
 
-# Join and calc industry loadings
-df_loadings = df_actual_returns.merge(
-    fos_h.find_feature("rbics_industry", "corporation", "classification")
-    .get_df()
-    .rename(columns={"value": "industry"}),
-    on=["id"],
-    how="left",
-)
-
+# Step 1: loading the dataframe and join them together
+# loading
+df_loadings = pd.read_parquet('john_rbics_industry.parquet')
+df_actual_returns = pd.read_parquet('john_return_prev_1d_open.parquet').fillna(0).rename(columns={"value": "return_1d"})
+df_sizes = pd.read_parquet('john_market_cap_open_dil.parquet').fillna(0).rename(columns={"value": "size"})
+# log and then winsorize
+#df_sizes['size'] = np.log(df_sizes['size'])
+df_values = pd.read_parquet('john_market_cap_open_dil_to_net_income_ltm.parquet').fillna(0).rename(columns={"value": "value"})
 df_loadings = pd.get_dummies(df_loadings, columns=["industry"])
+
+# merge these dataframe into one
+df_sizes = df_sizes.merge(df_values, how='left', on=['id','datetime'])
+df_actual_returns = df_actual_returns.merge(df_sizes, how='left', on=['id','datetime'])
+df_loadings = pd.merge(df_actual_returns, df_loadings, how='left', on=None, left_on='id', right_on='id', left_index=False)
+
+
+#df_loadings = pd.get_dummies(df_loadings, columns=["industry"])
 for col in df_loadings.columns:
     if col.startswith("industry_"):
         df_loadings[col] = df_loadings[col].astype(int)
 
 df_loadings = df_loadings.rename(columns={"value": "return_1d"})
 
+# Step 2: Calculate momentum (e.g., 12-month cumulative return)
+
+# sliding window size for volatiltiy and momentum
+look_back_period_volatility = 252  # Approx. 12 months for daily data
+look_back_period_momentum = 30
+#df_loadings['momentum'] = df_loadings.groupby('id')['return_1d'].apply(lambda x: x.rolling(window=look_back_period_momentum).apply(lambda y: np.prod(1 + y) - 1))
+df_loadings['volatility'] = df_loadings.groupby('id')['return_1d'].apply(lambda x: x.rolling(window=look_back_period_volatility).std()).reset_index(level = 'id').rename(columns={"return_1d": "volatility"}).volatility
+df_loadings['momentum'] = df_loadings.groupby('id')['return_1d'].rolling(window=look_back_period_momentum).apply(lambda x: np.prod(1 + x) - 1, raw = True).reset_index(level = 'id').rename(columns={"return_1d": "momentum"}).momentum
+# drop those nan values less than then window size
+df_loadings.dropna(inplace = True)
+
+# Step 3: identify some inf values and replace them as 0
+
+# generate an inf mask and count the True value
+df_numeric = df_loadings.apply(pd.to_numeric, errors='coerce')
+inf_mask = np.isinf(df_numeric)
+inf_counts = inf_mask.sum()
+
+print('inf value count in each of the factors')
+print(inf_counts)
+
+# replace np.inf and -np.inf as 0 in df_loadings
+df_loadings.replace([np.inf, -np.inf], 0, inplace=True)
+
+# Step 4: adding a country factor and fake a quality factor
+#np.random.seed(42)  # For reproducibility
+#df_loadings['country'] = 1
+#df_loadings['quality'] = np.random.randn(len(df_loadings))  # Simulating quality factor
+
+# Step 5: slice the dataframe after 2022-09-07
+min_dt = '2020-09-07'
+df_loadings = df_loadings[df_loadings.datetime >= min_dt]
+
 #### 4.2 Calc Factor Returns
 
-from sklearn.linear_model import LinearRegression
+# based on the datetime to obtain a regression on all different stocks
+
+# Step 1: filter the outlier and standarized the style factors
+def get_filter_standarized_df(df: pd.DataFrame) -> pd.DataFrame:
+    def get_median_filter(x, x_M, MAD, n=3):
+        # filter extreme value. MAD method
+        # MAD is better than 3std away from mean method, and Inter Quantile Range(IQR) method
+        # 𝑥̃𝑖 = 𝑥𝑀 + 𝑛 ∗ 𝐷_𝑀𝐴𝐷, 𝑖𝑓 𝑥𝑖 > 𝑥𝑀 + 𝑛 ∗ 𝐷𝑀𝐴𝐷
+        # 𝑥̃𝑖 = 𝑥𝑀 −𝑛 ∗ 𝐷𝑀𝐴𝐷,  𝑖𝑓 𝑥𝑖 < 𝑥𝑀 −𝑛 ∗ 𝐷𝑀𝐴𝐷
+        # 𝑥̃𝑖 = xi else
+
+        # D_MAD = abs(x - x_M)
+        modified_z_score = 0.6745 * (x - x_M) / MAD
+        if abs(modified_z_score) > n:
+            return modified_z_score * MAD / 0.6745 + x_M
+        else:
+            return x
+
+    def standardize(x, mean, std):
+        # z-socre all style factors
+        return (x - mean) / std
+
+    # filter out the columns need to apply a standarization: the column should only include style factors
+    style_factors_cols = [col for col in df.columns if
+                          not col.startswith('industry_') and col not in ['country', 'datetime', 'id', 'return_1d']]
+
+    # apply outlier filter
+    # medians = df[style_factors_cols].median()
+    for col in style_factors_cols:
+        #     MAD = median(np.absolute(df.loc[:,col] - medians[col]))
+        #     df.loc[:,col] = df[col].apply(lambda x: get_median_filter(x, medians[col],MAD))
+        # using winsorize
+        df.loc[:, col] = winsorize(df.loc[:, col], limits=[0.025, 0.025])
+
+    # apply factor standarization
+    means = df[style_factors_cols].mean()
+    stds = df[style_factors_cols].std()
+
+    for col in style_factors_cols:
+        df.loc[:, col] = standardize(df[col], means[col], stds[col])
+
+    return df
+
+# Step 2: identify factor effectiveness
+def get_t_statistics(model,X,y):
+    predictions = model.predict(X)
+    residuals = y - predictions
+    # Calculate the residual standard error
+    rss = (residuals ** 2).sum()
+    n = len(y)      # number of sample
+    p = X.shape[1]  # number of factors
+
+    rse = (rss / (n - p - 1)) ** 0.5
+    print(n,p,rse)
+    # Calculate t-values for coefficients
+    t_values = model.coef_ / rse
+    print(model.coef_,rse)
+    return t_values
+
+
+# Step 3: Dictionary to store regression results
+
+"""
+1.
+it comes out with an warning like this:
+# /var/folders/sg/1nh38dx53_zc3kxcq1cq1f000000gn/T/ipykernel_29543/1917117034.py:11: RuntimeWarning: invalid value encountered in divide
+#  t_values = model.coef_ / rse
+
+this is caused by t_values = model.coef_ / rse while certain model.coef_ value is too low (about e-17 level). Overall the code is fine.
+We can just mute this warning later
+
+2. some results shows [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.] 0.0 which model.coef_ is a zero list, and rse is zero 
+as well
+"""
+
+factor_returns = {}
+
+# Iterating over each distinct date/ month/ year
+# modify it to monthly
+# period = 'D'
+# df_loadings["datetime"] = df_loadings["datetime"].dt.to_period(period)
+for d in df_loadings["datetime"].unique():
+    # Isolating the data for the current date
+    df_current = df_loadings[df_loadings["datetime"] == d]
+
+    # outlier modification and factor standarization
+    df_current = get_filter_standarized_df(df_current)
+
+    # identify factor effectiveness
+    # Defining the dependent variable (y) and independent variables (X)
+    y = df_current["return_1d"]
+    X = df_current.drop(columns=["return_1d", "datetime", "id"])
+
+    # Performing linear regression
+    model = LinearRegression(fit_intercept=False).fit(X, y)
+
+    t_values = get_t_statistics(model, X, y)
+
+    # Print t-values for each factor
+    # print("T-Values:")
+    # for i, factor in enumerate(X.columns):
+    #     print(f"{factor}: {t_values[i]}")
+
+    # Storing the coefficients and intercept
+    factor_returns[d] = {
+        "coefficients": model.coef_,
+        "intercept": model.intercept_,
+        "feature_names": model.feature_names_in_,
+        "r2": model.score(X, y),
+        # t_values added to the factor_returns dataframe
+        "t-values": abs(t_values)
+    }
+
+
+#### 4.3 Calc Factor Returns
 
 # Dictionary to store regression results
 factor_returns = {}
