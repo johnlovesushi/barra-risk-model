@@ -34,6 +34,24 @@ class FactorCovAdjuster:
         self.second_level_index = FRM.columns
         self.first_level_index = FRM.index[self.window-1:]
 
+    def convert_cov_matrices(self,cov_matrices: list) -> pd.DataFrame:
+        """Convert the list of covariance matrix (3D) to 2D pandas DataFrame
+
+        Parameters
+        ----------
+        cov_matrices : list
+            A list of covariance matrix (one or more depends on the window)
+
+        Returns
+        -------
+        pd.DataFrame
+            cov_matrices, 2D pandas.DataFrame with 2 level of index (datetime, factor)
+        """
+        cov_matrices = np.array(cov_matrices)
+        multi_index = pd.MultiIndex.from_product([self.first_level_index, self.second_level_index], names=['datetime', 'factor'])
+        return pd.DataFrame(cov_matrices.reshape((-1, cov_matrices.shape[-1])), index = multi_index, columns = self.second_level_index)
+        
+        
     def calc_fcm_raw(self, half_life: int | None = None) -> pd.DataFrame:
         """Calculate the factor covariance matrix, FCM (K*K)
 
@@ -53,14 +71,8 @@ class FactorCovAdjuster:
         else:
             for i in range(len(self.FRM)-window+1):
                 cov_matrices.append(cov_ewa(self.FRM.iloc[i:i+window,:].T.to_numpy(), half_life))
-                #print(cov_ewa(test.iloc[i:i+window,:].T.to_numpy()))
-        cov_matrices = np.array(cov_matrices)
-        #print(cov_matrices)
-        #self.FCM = cov_ewa(self.FRM, half_life).astype("float64")
-        multi_index = pd.MultiIndex.from_product([self.first_level_index, self.second_level_index], names=['datetime', 'factor'])
-        #print(multi_index)
-        return pd.DataFrame(cov_matrices.reshape((-1, cov_matrices.shape[-1])), index = multi_index, columns = self.second_level_index)
 
+        return self.convert_cov_matrices(cov_matrices)
 
     def newey_west_adjust(self,
         FRM: np.ndarray, half_life: int, max_lags: int, multiplier: int
@@ -106,12 +118,7 @@ class FactorCovAdjuster:
                                             max_lags = max_lags, 
                                             multiplier = multiplier))
 
-        cov_matrices = np.array(cov_matrices)
-        #print(cov_matrices)
-        #self.FCM = cov_ewa(self.FRM, half_life).astype("float64")
-        multi_index = pd.MultiIndex.from_product([self.first_level_index, self.second_level_index], names=['datetime', 'factor'])
-        #print(multi_index)
-        return pd.DataFrame(cov_matrices.reshape((-1, cov_matrices.shape[-1])), index = multi_index, columns = self.second_level_index)
+        return self.convert_cov_matrices(cov_matrices)
 
     def eigenfactor_risk_adjust(self, FCM, coef: float, M: int = 1000) -> np.ndarray:
         """Apply eigenfactor risk adjustment on `F_NW`
@@ -163,13 +170,8 @@ class FactorCovAdjuster:
                                             max_lags = max_lags, 
                                             multiplier = multiplier)
                 cov_matrices.append(self.eigenfactor_risk_adjust(FCM, coef, M))
-        cov_matrices = np.array(cov_matrices)
-        #print(cov_matrices)
-        #self.FCM = cov_ewa(self.FRM, half_life).astype("float64")
-        multi_index = pd.MultiIndex.from_product([self.first_level_index, self.second_level_index], names=['datetime', 'factor'])
-        #print(multi_index)
-        return pd.DataFrame(cov_matrices.reshape((-1, cov_matrices.shape[-1])), index = multi_index, columns = self.second_level_index)
 
+        return self.convert_cov_matrices(cov_matrices)
 
     def volatility_regime_adjust(self, FCM: np.ndarray, FRM: np.ndarray, half_life: int) -> np.ndarray:
         """Apply volatility regime adjustment on `F_Eigen`
@@ -216,10 +218,5 @@ class FactorCovAdjuster:
                 
                 FCM = self.eigenfactor_risk_adjust(FCM, coef, M)
                 cov_matrices.append(self.volatility_regime_adjust(FCM, self.FRM.iloc[i:i+window,:].T.to_numpy(),half_life))
-        cov_matrices = np.array(cov_matrices)
-        #print(cov_matrices)
-        #self.FCM = cov_ewa(self.FRM, half_life).astype("float64")
-        multi_index = pd.MultiIndex.from_product([self.first_level_index, self.second_level_index], names=['datetime', 'factor'])
-        #print(multi_index)
-        return pd.DataFrame(cov_matrices.reshape((-1, cov_matrices.shape[-1])), index = multi_index, columns = self.second_level_index)
-    
+
+        return self.convert_cov_matrices(cov_matrices)    
