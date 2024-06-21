@@ -113,7 +113,7 @@ class FactorCovAdjuster:
         #print(multi_index)
         return pd.DataFrame(cov_matrices.reshape((-1, cov_matrices.shape[-1])), index = multi_index, columns = self.second_level_index)
 
-    def eigenfactor_risk_adjust(self, coef: float, M: int = 1000) -> np.ndarray:
+    def eigenfactor_risk_adjust(self, FCM, coef: float, M: int = 1000) -> np.ndarray:
         """Apply eigenfactor risk adjustment on `F_NW`
 
         Parameters
@@ -128,7 +128,7 @@ class FactorCovAdjuster:
         np.ndarray
             Eigenfactor risk adjusted FCM, denoted by `F_Eigen`
         """
-        D_0, U_0 = np.linalg.eigh(self.FCM)
+        D_0, U_0 = np.linalg.eigh(FCM)
         D_0[D_0 <= 0] = 1e-14  # fix numerical error
         Lambda = np.zeros((self.K,))
         for _ in range(M):
@@ -137,35 +137,89 @@ class FactorCovAdjuster:
             F_m = f_m.dot(f_m.T) / (self.T - 1)
             D_m, U_m = np.linalg.eigh(F_m)
             D_m[D_m <= 0] = 1e-14  # fix numerical error
-            D_m_tilde = U_m.T.dot(self.FCM).dot(U_m)
+            D_m_tilde = U_m.T.dot(FCM).dot(U_m)
             Lambda += np.diag(D_m_tilde) / D_m
         Lambda[Lambda <= 0] = 1e-14  # fix numerical error
         Lambda = np.sqrt(Lambda / M)
         Gamma = coef * (Lambda - 1.0) + 1.0
         D_0_tilde = Gamma**2 * D_0
-        self.FCM = U_0.dot(np.diag(D_0_tilde)).dot(U_0.T)
-        return self.FCM
+        FCM = U_0.dot(np.diag(D_0_tilde)).dot(U_0.T)
+        return FCM
 
-    def volatility_regime_adjust(
-        self, prev_fcm: np.ndarray, half_life: int
-    ) -> np.ndarray:
+    def calc_eigenfactor_risk_frm(self, max_lags:int, multiplier: int, half_life: int | None = None, 
+                                  coef: float = 1.2, M: int = 1000) -> pd.DataFrame:
+
+        cov_matrices = []
+        if not self.window:
+            FCM = self.newey_west_adjust(self.FRM.T.to_numpy(), 
+                                                  half_life = half_life, 
+                                                  max_lags = max_lags, 
+                                                  multiplier = multiplier)
+            cov_matrices.append(self.eigenfactor_risk_adjust(FCM, coef, M))
+        else:
+            for i in range(len(self.FRM)-window+1):
+                FCM = self.newey_west_adjust(self.FRM.iloc[i:i+window,:].T.to_numpy(), 
+                                            half_life = half_life,
+                                            max_lags = max_lags, 
+                                            multiplier = multiplier)
+                cov_matrices.append(self.eigenfactor_risk_adjust(FCM, coef, M))
+        cov_matrices = np.array(cov_matrices)
+        #print(cov_matrices)
+        #self.FCM = cov_ewa(self.FRM, half_life).astype("float64")
+        multi_index = pd.MultiIndex.from_product([self.first_level_index, self.second_level_index], names=['datetime', 'factor'])
+        #print(multi_index)
+        return pd.DataFrame(cov_matrices.reshape((-1, cov_matrices.shape[-1])), index = multi_index, columns = self.second_level_index)
+
+
+    def volatility_regime_adjust(self, FCM: np.ndarray, FRM: np.ndarray, half_life: int) -> np.ndarray:
         """Apply volatility regime adjustment on `F_Eigen`
 
         Parameters
         ----------
-        prev_fcm : np.ndarray
+        FCM : np.ndarray
             Previously estimated factor covariance matrix (last `F_Eigen`, since `F_VRA`
             could lead to huge fluctuations) on only one period (not aggregated); the
             order of factors should remain the same
         half_life : int
             Steps it takes for weight in EWA to reduce to half of the original value
 
+        FRM: np.ndarray
+            Factor return matrix (T*K)
         Returns
         -------
         np.ndarray
             Volatility regime adjusted FCM, denoted by `F_VRA`
         """
-        sigma = np.sqrt(np.diag(prev_fcm))
-        B = BiasStatsCalculator(self.FRM, sigma).single_window(half_life)
-        self.FCM = self.FCM * (B**2).mean(axis=0)  # Lambda^2
-        return self.FCM
+        sigma = np.sqrt(np.diag(FCM))
+        B = BiasStatsCalculator(FRM, sigma).single_window(half_life)
+        FCM = FCM * (B**2).mean(axis=0)  # Lambda^2
+        return FCM
+
+    def calc_volatility_regime_frm(self, max_lags:int, multiplier: int, half_life: int | None = None, 
+                                  coef: float = 1.2, M: int = 1000):
+
+        cov_matrices = []
+        if not self.window:
+            FCM = self.newey_west_adjust(self.FRM.T.to_numpy(), 
+                                                  half_life = half_life, 
+                                                  max_lags = max_lags, 
+                                                  multiplier = multiplier)
+            
+            FCM = self.eigenfactor_risk_adjust(FCM, coef, M)
+            cov_matrices.append(self.volatility_regime_adjust(FCM, self.FRM.T.to_numpy(),half_life))
+        else:
+            for i in range(len(self.FRM)-window+1):
+                FCM = self.newey_west_adjust(self.FRM.iloc[i:i+window,:].T.to_numpy(), 
+                                            half_life = half_life,
+                                            max_lags = max_lags, 
+                                            multiplier = multiplier)
+                
+                FCM = self.eigenfactor_risk_adjust(FCM, coef, M)
+                cov_matrices.append(self.volatility_regime_adjust(FCM, self.FRM.iloc[i:i+window,:].T.to_numpy(),half_life))
+        cov_matrices = np.array(cov_matrices)
+        #print(cov_matrices)
+        #self.FCM = cov_ewa(self.FRM, half_life).astype("float64")
+        multi_index = pd.MultiIndex.from_product([self.first_level_index, self.second_level_index], names=['datetime', 'factor'])
+        #print(multi_index)
+        return pd.DataFrame(cov_matrices.reshape((-1, cov_matrices.shape[-1])), index = multi_index, columns = self.second_level_index)
+    
