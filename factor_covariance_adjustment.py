@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from bias_statistics import BiasStatsCalculator
 from utils import cov_ewa
 
@@ -69,8 +70,8 @@ class FactorCovAdjuster:
         if not self.window:
             cov_matrices.append(cov_ewa(self.FRM.T.to_numpy(), half_life))
         else:
-            for i in range(len(self.FRM)-window+1):
-                cov_matrices.append(cov_ewa(self.FRM.iloc[i:i+window,:].T.to_numpy(), half_life))
+            for i in range(len(self.FRM)-self.window+1):
+                cov_matrices.append(cov_ewa(self.FRM.iloc[i:i+self.window,:].T.to_numpy(), half_life))
 
         return self.convert_cov_matrices(cov_matrices)
 
@@ -112,8 +113,8 @@ class FactorCovAdjuster:
                                                   max_lags = max_lags, 
                                                   multiplier = multiplier))
         else:
-            for i in range(len(self.FRM)-window+1):
-                cov_matrices.append(self.newey_west_adjust(self.FRM.iloc[i:i+window,:].T.to_numpy(), 
+            for i in range(len(self.FRM)-self.window+1):
+                cov_matrices.append(self.newey_west_adjust(self.FRM.iloc[i:i+self.window,:].T.to_numpy(),
                                             half_life = half_life,
                                             max_lags = max_lags, 
                                             multiplier = multiplier))
@@ -164,8 +165,8 @@ class FactorCovAdjuster:
                                                   multiplier = multiplier)
             cov_matrices.append(self.eigenfactor_risk_adjust(FCM, coef, M))
         else:
-            for i in range(len(self.FRM)-window+1):
-                FCM = self.newey_west_adjust(self.FRM.iloc[i:i+window,:].T.to_numpy(), 
+            for i in range(len(self.FRM)-self.window+1):
+                FCM = self.newey_west_adjust(self.FRM.iloc[i:i+self.window,:].T.to_numpy(),
                                             half_life = half_life,
                                             max_lags = max_lags, 
                                             multiplier = multiplier)
@@ -210,13 +211,13 @@ class FactorCovAdjuster:
             FCM = self.eigenfactor_risk_adjust(FCM, coef, M)
             cov_matrices.append(self.volatility_regime_adjust(FCM, self.FRM.T.to_numpy(),half_life))
         else:
-            for i in range(len(self.FRM)-window+1):
-                FCM = self.newey_west_adjust(self.FRM.iloc[i:i+window,:].T.to_numpy(), 
+            for i in range(len(self.FRM)-self.window+1):
+                FCM = self.newey_west_adjust(self.FRM.iloc[i:i+self.window,:].T.to_numpy(),
                                             half_life = half_life,
                                             max_lags = max_lags, 
                                             multiplier = multiplier)
                 
                 FCM = self.eigenfactor_risk_adjust(FCM, coef, M)
-                cov_matrices.append(self.volatility_regime_adjust(FCM, self.FRM.iloc[i:i+window,:].T.to_numpy(),half_life))
+                cov_matrices.append(self.volatility_regime_adjust(FCM, self.FRM.iloc[i:i+self.window,:].T.to_numpy(),half_life))
 
         return self.convert_cov_matrices(cov_matrices)    
