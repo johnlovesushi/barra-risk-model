@@ -17,7 +17,7 @@ def winsorization_standardization_group(group,cols):
 
     return group
 
-def load_factor_data(startDate = None):
+def load_factor_data(startDate = None, endDate = None):
 
     # Step 1: loading the dataframe and join them together
     # loading
@@ -58,6 +58,8 @@ def load_factor_data(startDate = None):
     #Step 3: Winsorize and standardize
     if startDate:
         df_loadings = df_loadings[df_loadings.datetime >= startDate]
+    if endDate:
+        df_loadings = df_loadings[df_loadings.datetime <= startDate]
 
 
     cols = [col for col in df_loadings if
