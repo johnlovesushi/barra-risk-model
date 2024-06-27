@@ -59,7 +59,7 @@ def load_factor_data(startDate = None, endDate = None):
     if startDate:
         df_loadings = df_loadings[df_loadings.datetime >= startDate]
     if endDate:
-        df_loadings = df_loadings[df_loadings.datetime <= startDate]
+        df_loadings = df_loadings[df_loadings.datetime <= endDate]
 
 
     cols = [col for col in df_loadings if
